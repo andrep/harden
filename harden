@@ -1,0 +1,10 @@
+#!/bin/zsh
+
+setopt noshwordsplit
+
+for i in "$@"; do
+  cp -HRp "$i" "$i".foo
+  rm -rf "$i"
+  mv "$i".foo "$i"
+done
+
