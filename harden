@@ -1,10 +1,112 @@
 #!/bin/zsh
 
+#             DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+#                     Version 2, December 2004
+# 
+#  Copyright (C) 2004 Sam Hocevar
+#   14 rue de Plaisance, 75014 Paris, France
+#  Everyone is permitted to copy and distribute verbatim or modified
+#  copies of this license document, and changing it is allowed as long
+#  as the name is changed.
+# 
+#             DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+#    TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+# 
+#   0. You just DO WHAT THE FUCK YOU WANT TO.
+
+# i miss perl
+function die()
+{
+  print "$@"
+  exit 1
+}
+
 setopt noshwordsplit
 
-for i in "$@"; do
-  cp -HRp "$i" "$i".foo
+copy_or_link=link
+
+while getopts hcl option_name
+do
+  case "$option_name" in 
+    c) copy_or_link=copy;;
+    l) copy_or_link=link;;
+    h) show_help=1;;
+  esac
+done
+
+[ "$#" = "0" ] && show_help=1
+
+if [ "$show_help" = 1 ]
+then
+  cat << EOF
+usage: $0 symlink...
+
+hardens symlinks by either copying the symlink destination to the original
+file, or creating an extra hard link to the original file.  either way will
+delete the original symlink in the process.
+
+directories specified on the command-line will be recursively chased.  copied
+files/directories will retain original metadata (timestamps etc).
+
+options:
+  -h: help (shows this text)
+  -l: hard-links the original file (default behaviour)
+  -c: copies the file
+EOF
+  exit 1
+fi
+
+seen_all_options=0
+
+for i in "$@"
+do
+  if [ $seen_all_options = 0 ]
+  then
+    case "$i" in
+      --) seen_all_options=1 && continue;;
+      -*) continue
+    esac
+  fi
+
+  symlink_target="$(/usr/bin/readlink "$i")"
+  if [ "$?" != 0 ]
+  then
+    print "$0: not a symlink (readlink failed with $?); skipping"
+    continue
+  fi
+
+  if [ -d "$symlink_target" ] && [ "$copy_or_link" = link ]
+  then
+    print "$0: cannot harden $i because it points to a directory $symlink_target, skipping"
+    continue
+  fi
+
+  tmpfile="$(/bin/mktemp -u "$i".XXXXXX)"
+
+  case "$copy_or_link" in
+    "copy")
+      /bin/cp -HRp "$symlink_target" "$tmpfile"
+      [ "$?" = 0 ] || die "$0: cp -HRp returned $?; aborting"
+      ;;
+    "link")
+      /bin/ln "$symlink_target" "$tmpfile"
+      [ "$?" = 0 ] || die "$0: ln returned $?; aborting"
+      ;;
+  esac
+
   rm -rf "$i"
-  mv "$i".foo "$i"
+  if [ "$?" != 0 ]
+  then
+    rm -rf "$i"
+    die "$0: couldn't delete $i"
+  fi
+
+  mv "$tmpfile" "$i"
+  if [ "$?" != 0 ]
+  then
+    rm -rf "$tmpfile"
+    die "$0: couldn't rename $tmpfile to $i; deleting $tmpfile"
+  fi
+
 done
 
