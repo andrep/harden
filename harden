@@ -1,4 +1,8 @@
-#!/bin/zsh
+#!/usr/bin/python
+
+# vim: set tabstop=4 shiftwidth=4 syntax=python expandtab:
+
+import errno, optparse, os, shutil, sys, tempfile
 
 #             DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
 #                     Version 2, December 2004
@@ -14,99 +18,112 @@
 # 
 #   0. You just DO WHAT THE FUCK YOU WANT TO.
 
-# i miss perl
-function die()
-{
-  print "$@"
-  exit 1
-}
+class HardenMode:
+    LINK = 0
+    COPY = 1
 
-setopt noshwordsplit
+encounteredCrossDeviceLink = False
 
-copy_or_link=link
-
-while getopts hcl option_name
-do
-  case "$option_name" in 
-    c) copy_or_link=copy;;
-    l) copy_or_link=link;;
-    h) show_help=1;;
-  esac
-done
-
-[ "$#" = "0" ] && show_help=1
-
-if [ "$show_help" = 1 ]
-then
-  cat << EOF
-usage: $0 symlink...
+def main():
+    usage = """%prog [options] file...
 
 hardens symlinks by either copying the symlink destination to the original
 file, or creating an extra hard link to the original file.  either way will
 delete the original symlink in the process.
 
-directories specified on the command-line will be recursively chased.  copied
-files/directories will retain original metadata (timestamps etc).
+directories specified on the command-line will be recursively chased. copied
+files/directories will retain original metadata (timestamps etc)."""
 
-options:
-  -h: help (shows this text)
-  -l: hard-links the original file (default behaviour)
-  -c: copies the file
-EOF
-  exit 1
-fi
+    optionParser = optparse.OptionParser(usage=usage)
+    optionParser.add_option("-l", "--link", action="store_const",
+            const=HardenMode.LINK, dest="hardenMode",
+            help=("hard-links the original file (default behaviour)"))
+    optionParser.add_option("-c", "--copy", action="store_const",
+            const=HardenMode.COPY, dest="hardenMode",
+            help=("copies the original file"))
+    optionParser.add_option("-v", "--verbose", action="count",
+            dest="verbosity",
+            help=("increases verbosity"))
+    optionParser.add_option("-n", "--dry-run", action="store_true",
+            dest="dryRun",
+            help=("don't actually perform the operations, just print " \
+                "them (implies -v)"))
 
-seen_all_options=0
+    (options, argvRemainder) = optionParser.parse_args()
 
-for i in "$@"
-do
-  if [ $seen_all_options = 0 ]
-  then
-    case "$i" in
-      --) seen_all_options=1 && continue;;
-      -*) continue
-    esac
-  fi
+    if not options.hardenMode: options.hardenMode = HardenMode.LINK
+    if options.dryRun and not options.verbosity:
+        options.verbosity = 1
 
-  symlink_target="$(/usr/bin/readlink "$i")"
-  if [ "$?" != 0 ]
-  then
-    print "$0: not a symlink (readlink failed with $?); skipping"
-    continue
-  fi
+    if len(argvRemainder) == 0:
+        optionParser.print_help()
+        return
 
-  if [ -d "$symlink_target" ] && [ "$copy_or_link" = link ]
-  then
-    print "$0: cannot harden $i because it points to a directory $symlink_target, skipping"
-    continue
-  fi
+    for arg in argvRemainder:
+        hardenPath(arg, options.hardenMode, options.verbosity, os.getcwd(),
+                options.dryRun)
 
-  tmpfile="$(/bin/mktemp -u "$i".XXXXXX)"
+    if encounteredCrossDeviceLink:
+        print >> sys.stderr, "(use -f flag to force cross-device links)"
 
-  case "$copy_or_link" in
-    "copy")
-      /bin/cp -HRp "$symlink_target" "$tmpfile"
-      [ "$?" = 0 ] || die "$0: cp -HRp returned $?; aborting"
-      ;;
-    "link")
-      /bin/ln "$symlink_target" "$tmpfile"
-      [ "$?" = 0 ] || die "$0: ln returned $?; aborting"
-      ;;
-  esac
+def hardenPath(path, mode, verbosity=0, cwd=None, dryRun=False):
+    if cwd == None: cwd = os.getcwd()
 
-  rm -rf "$i"
-  if [ "$?" != 0 ]
-  then
-    rm -rf "$i"
-    die "$0: couldn't delete $i"
-  fi
+    if os.path.isdir(path):
+        if verbosity >= 1:
+            print "cd %s" % path
+        for file in sorted(os.listdir(path)):
+            hardenPath(os.path.join(path, file), mode, verbosity, cwd, dryRun)
+    elif os.path.islink(path):
+        symlinkDestination = os.readlink(path)
+        absoluteSymlinkDestination = os.path.join(os.path.dirname(path),
+                symlinkDestination)
+        if not os.path.exists(absoluteSymlinkDestination):
+            print "warning: path at %s is a broken symlink to %s, " \
+                    "skipping" % (path, symlinkDestination)
+            return
+        
+        (dirname, basename) = os.path.split(path)
 
-  mv "$tmpfile" "$i"
-  if [ "$?" != 0 ]
-  then
-    rm -rf "$tmpfile"
-    die "$0: couldn't rename $tmpfile to $i; deleting $tmpfile"
-  fi
+        (tmpFd, tmpPath) = tempfile.mkstemp(".harden", ".%s." % basename,
+                dirname)
+        os.close(tmpFd)
+        os.unlink(tmpPath)
 
-done
+        try:
+            if mode == HardenMode.LINK:
+                if not dryRun:
+                    os.link(absoluteSymlinkDestination, tmpPath)
+            elif mode == HardenMode.COPY:
+                if not dryRun:
+                    shutil.copy2(absoluteSymlinkDestination, tmpPath)
+        except OSError, (e):
+            if mode == HardenMode.LINK and e.errno == errno.EXDEV:
+                encounteredCrossDeviceLink = True
+                print >> sys.stderr, "warning: %s is a cross-device link, " \
+                        "skipping" % path
+            else:
+                print >> sys.stderr, "warning: %s: %s" % (path, e.strerror)
+            return
+
+        if not dryRun:
+            if not os.path.exists(tmpPath):
+                print >> sys.stderr, "couldn't create tmp path at %s" % tmpPath
+                sys.exit(1)
+
+            os.unlink(path)
+            os.rename(tmpPath, path)
+
+        if verbosity >= 1:
+            if mode == HardenMode.LINK:
+                print "ln %s %s" % (symlinkDestination, path)
+            if mode == HardenMode.COPY:
+                print "cp %s %s" % (symlinkDestination, path)
+
+    else:
+        # neither a directory nor a symlink; skip
+        pass
+
+if __name__ == "__main__":
+    main()
 
